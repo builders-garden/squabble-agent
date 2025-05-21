@@ -11,28 +11,30 @@ import {
   type DecodedMessage,
   Conversation,
 } from "@xmtp/node-sdk";
-import express, { Request, Response } from "express";
+import express from "express";
 import { generateResponse } from "./openAi/client";
 import fetch from "node-fetch";
+import { setupRoutes } from "./api/routes";
+import { fetchUsersByAddresses } from "./lib/neynar.ts";
 
 /* Get the wallet key associated to the public key of
  * the agent and the encryption key for the local db
  * that stores your agent's messages */
-const { WALLET_KEY, ENCRYPTION_KEY, XMTP_ENV, SQUABBLE_URL } =
-  validateEnvironment([
-    "WALLET_KEY",
-    "ENCRYPTION_KEY",
-    "XMTP_ENV",
-    "SQUABBLE_URL",
-  ]);
-
-/* Create the signer using viem and parse the encryption key for the local db */
-const signer = createSigner(WALLET_KEY);
-const dbEncryptionKey = getEncryptionKeyFromHex(ENCRYPTION_KEY);
-const dbPath = getDbPath(XMTP_ENV);
-console.log("dbPath", dbPath);
-
-console.log("dbEncryptionKey", dbEncryptionKey);
+const {
+  WALLET_KEY,
+  ENCRYPTION_KEY,
+  XMTP_ENV,
+  SQUABBLE_URL,
+  NEYNAR_API_KEY,
+  AGENT_INBOX_ID,
+} = validateEnvironment([
+  "WALLET_KEY",
+  "ENCRYPTION_KEY",
+  "XMTP_ENV",
+  "SQUABBLE_URL",
+  "NEYNAR_API_KEY",
+  "AGENT_INBOX_ID",
+]);
 
 let xmtpClient: Client | null = null;
 
@@ -57,7 +59,8 @@ interface InboxState {
 async function handleCommand(
   command: string,
   conversation: Conversation,
-  senderAddress?: string
+  senderAddress?: string,
+  xmtpClient?: Client
 ) {
   const [baseCommand, subCommand] = command.split(" ");
 
@@ -67,13 +70,15 @@ async function handleCommand(
         // List all available commands
         await conversation.send(`🎮 Available Squabble Commands:
           • /squabble help - Show game rules and instructions
-          • /squabble start - Start a new game
+          • /squabble start [betAmount] - Start a new game (optional bet amount)
           • /squabble leaderboard - View current standings
           • /squabble latest - View the latest game details`);
         return;
       }
 
-      switch (subCommand.toLowerCase()) {
+      const [command, betAmount] = subCommand.split(" ");
+
+      switch (command.toLowerCase()) {
         case "help":
           const rulesPrompt =
             "Generate a concise and engaging explanation of the Squabble game rules. Include that players take turns making moves and the goal is to capture the most territory. Also mention that players can use /squabble start to begin a new game and /squabble leaderboard to see current standings.";
@@ -82,8 +87,21 @@ async function handleCommand(
           break;
 
         case "start":
-          const usernames = await conversation.members();
-          console.log("usernames", JSON.stringify(usernames, null, 2));
+          const members = await conversation.members();
+          const inboxIds = members
+            .map((member) => member.inboxId)
+            .filter((id) => id !== AGENT_INBOX_ID);
+          console.log("Inbox IDs (excluding agent):", inboxIds);
+
+          // Get addresses for all members
+          const memberStates =
+            await xmtpClient?.preferences.inboxStateFromInboxIds(inboxIds);
+          const memberAddresses = memberStates
+            ?.map((state) => state?.recoveryIdentifier?.identifier)
+            .filter(Boolean);
+
+          const usersFIDs = await fetchUsersByAddresses(memberAddresses!);
+
           try {
             const response = await fetch(`${SQUABBLE_URL}/api/create-game`, {
               method: "POST",
@@ -91,9 +109,10 @@ async function handleCommand(
                 "Content-Type": "application/json",
               },
               body: JSON.stringify({
-                usernames: usernames,
-                betAmount: "0.1", // Placeholder bet amount
-                creator: senderAddress || "unknown", // Use the sender's address if available
+                usernames: usersFIDs,
+                betAmount: betAmount || "0",
+                creator: senderAddress || "unknown",
+                conversationId: conversation?.id,
               }),
             });
 
@@ -141,55 +160,32 @@ async function handleCommand(
   }
 }
 
-// Initialize Express app
-const app = express();
-app.use(express.json());
-
-// Endpoint to trigger bot message
-app.post("/api/send-message", async (req: Request, res: Response) => {
-  try {
-    const { conversationId, message } = req.body;
-
-    console.log("conversationId", conversationId);
-    console.log("message", message);
-
-    if (!conversationId || !message) {
-      return res
-        .status(400)
-        .json({ error: "ConversationId and message are required" });
-    }
-
-    if (!xmtpClient) {
-      return res.status(500).json({ error: "XMTP client not initialized" });
-    }
-
-    // Get or create conversation
-    const conversation = await xmtpClient.conversations.getConversationById(
-      conversationId
-    );
-    console.log("conversation", conversation);
-    if (!conversation) {
-      return res.status(404).json({ error: "Conversation not found" });
-    }
-
-    await conversation.send(message);
-
-    res.json({ success: true, message: "Message sent successfully" });
-  } catch (error) {
-    console.error("Error sending message:", error);
-    res.status(500).json({ error: "Failed to send message" });
-  }
-});
-
 async function main() {
+  const signer = createSigner(WALLET_KEY);
+  const dbEncryptionKey = getEncryptionKeyFromHex(ENCRYPTION_KEY);
+  const dbPath = getDbPath(XMTP_ENV);
+
   xmtpClient = await Client.create(signer, {
     dbEncryptionKey,
     env: "dev" as XmtpEnv,
     dbPath,
   });
-  console.log("XMTP Client initialized with inbox ID:", xmtpClient.inboxId);
 
-  //void logAgentDetails(xmtpClient);
+  // Initialize Express app
+  const app = express();
+  app.use(express.json());
+
+  // Setup routes with initialized client
+  setupRoutes(app, xmtpClient);
+
+  // Start Express server
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+
+  // Log agent details
+  void logAgentDetails(xmtpClient);
 
   await xmtpClient.conversations.sync();
 
@@ -206,13 +202,15 @@ async function main() {
     }
 
     const conversationId = message.conversationId;
-    console.log("conversationId", conversationId);
-    console.log("message.id", message.id);
 
     const conversation = await xmtpClient.conversations.getConversationById(
       conversationId
     );
-    console.log("conversation", JSON.stringify(conversation, null, 2));
+    console.log("conversation details:", {
+      id: conversation?.id,
+      type: conversation?.constructor.name,
+      createdAt: conversation?.createdAt,
+    });
 
     if (!conversation) {
       console.log("Unable to find conversation, skipping");
@@ -229,20 +227,24 @@ async function main() {
     const senderAddress = senderState[0]?.recoveryIdentifier?.identifier;
     console.log("senderAddress", senderAddress);
 
-    console.log("members", await conversation.members());
+    const members = await conversation.members();
+    console.log(
+      "Members details:",
+      members.map((member) => ({
+        inboxId: member.inboxId,
+        accountIdentifiers: member.accountIdentifiers,
+        installationIds: member.installationIds,
+        permissionLevel: member.permissionLevel,
+        consentState: member.consentState,
+      }))
+    );
 
     if (messageText.startsWith("/")) {
-      await handleCommand(messageText, conversation, senderAddress);
+      await handleCommand(messageText, conversation, senderAddress, xmtpClient);
     }
 
     console.log("Waiting for messages...");
   }
 }
-
-// Start Express server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
 
 main().catch(console.error);

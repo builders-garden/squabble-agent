@@ -162,3 +162,4 @@ export function validateEnvironment(vars: string[]): Record<string, string> {
     return acc;
   }, {});
 }
+

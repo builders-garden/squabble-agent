@@ -3,6 +3,7 @@ import {
   getEncryptionKeyFromHex,
   logAgentDetails,
   validateEnvironment,
+  getDbPath,
 } from "./helpers/client.ts";
 import {
   Client,
@@ -28,6 +29,9 @@ const { WALLET_KEY, ENCRYPTION_KEY, XMTP_ENV, SQUABBLE_URL } =
 /* Create the signer using viem and parse the encryption key for the local db */
 const signer = createSigner(WALLET_KEY);
 const dbEncryptionKey = getEncryptionKeyFromHex(ENCRYPTION_KEY);
+const dbPath = getDbPath(XMTP_ENV);
+console.log("dbPath", dbPath);
+
 console.log("dbEncryptionKey", dbEncryptionKey);
 
 let xmtpClient: Client | null = null;
@@ -142,14 +146,17 @@ const app = express();
 app.use(express.json());
 
 // Endpoint to trigger bot message
-app.post("/send-message", async (req: Request, res: Response) => {
+app.post("/api/send-message", async (req: Request, res: Response) => {
   try {
-    const { groupId, message } = req.body;
+    const { conversationId, message } = req.body;
 
-    if (!groupId || !message) {
+    console.log("conversationId", conversationId);
+    console.log("message", message);
+
+    if (!conversationId || !message) {
       return res
         .status(400)
-        .json({ error: "GroupId and message are required" });
+        .json({ error: "ConversationId and message are required" });
     }
 
     if (!xmtpClient) {
@@ -158,8 +165,9 @@ app.post("/send-message", async (req: Request, res: Response) => {
 
     // Get or create conversation
     const conversation = await xmtpClient.conversations.getConversationById(
-      groupId
+      conversationId
     );
+    console.log("conversation", conversation);
     if (!conversation) {
       return res.status(404).json({ error: "Conversation not found" });
     }
@@ -177,8 +185,11 @@ async function main() {
   xmtpClient = await Client.create(signer, {
     dbEncryptionKey,
     env: "dev" as XmtpEnv,
+    dbPath,
   });
-  void logAgentDetails(xmtpClient);
+  console.log("XMTP Client initialized with inbox ID:", xmtpClient.inboxId);
+
+  //void logAgentDetails(xmtpClient);
 
   await xmtpClient.conversations.sync();
 
@@ -195,6 +206,8 @@ async function main() {
     }
 
     const conversationId = message.conversationId;
+    console.log("conversationId", conversationId);
+    console.log("message.id", message.id);
 
     const conversation = await xmtpClient.conversations.getConversationById(
       conversationId

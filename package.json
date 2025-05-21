@@ -4,14 +4,16 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.js"
+    "start": "tsx src/index.ts"
   },
   "dependencies": {
     "@upstash/redis": "^1.34.9",
     "@xmtp/node-sdk": "^2.0.9",
-    "openai": "^4.100.0"
+    "express": "^4.18.2",
+    "openai": "^4.28.0"
   },
   "devDependencies": {
+    "@types/express": "^4.17.21",
     "tsx": "^4.7.1",
     "typescript": "^5.4.5"
   },

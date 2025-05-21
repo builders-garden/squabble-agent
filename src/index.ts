@@ -4,94 +4,202 @@ import {
   logAgentDetails,
   validateEnvironment,
 } from "./helpers/client.ts";
-import { Client, type XmtpEnv, type DecodedMessage } from "@xmtp/node-sdk";
-import OpenAI from "openai";
+import {
+  Client,
+  type XmtpEnv,
+  type DecodedMessage,
+  Conversation,
+} from "@xmtp/node-sdk";
+import express, { Request, Response } from "express";
+import { generateResponse } from "./openAi/client";
+import fetch from "node-fetch";
 
 /* Get the wallet key associated to the public key of
  * the agent and the encryption key for the local db
  * that stores your agent's messages */
-const { WALLET_KEY, ENCRYPTION_KEY, XMTP_ENV, OPENAI_API_KEY } =
+const { WALLET_KEY, ENCRYPTION_KEY, XMTP_ENV, SQUABBLE_URL } =
   validateEnvironment([
     "WALLET_KEY",
     "ENCRYPTION_KEY",
     "XMTP_ENV",
-    "OPENAI_API_KEY",
+    "SQUABBLE_URL",
   ]);
 
 /* Create the signer using viem and parse the encryption key for the local db */
 const signer = createSigner(WALLET_KEY);
 const dbEncryptionKey = getEncryptionKeyFromHex(ENCRYPTION_KEY);
+console.log("dbEncryptionKey", dbEncryptionKey);
 
-const openai = new OpenAI({
-  apiKey: OPENAI_API_KEY,
-});
+let xmtpClient: Client | null = null;
 
-async function generateResponse(prompt: string): Promise<string> {
-  const completion = await openai.chat.completions.create({
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are a helpful game assistant for Squabble. Keep responses concise and engaging.",
-      },
-      { role: "user", content: prompt },
-    ],
-    model: "gpt-3.5-turbo",
-  });
-
-  return (
-    completion.choices[0]?.message?.content ||
-    "Sorry, I couldn't generate a response."
-  );
+interface Identity {
+  kind: string;
+  identifier: string;
+  relyingPartner: string;
 }
 
-async function handleCommand(command: string, conversation: any) {
-  switch (command.toLowerCase()) {
-    case "@squabble":
-      const rulesPrompt =
-        "Generate a concise and engaging explanation of the Squabble game rules. Include that players take turns making moves and the goal is to capture the most territory. Also mention that players can use @start-game to begin a new game and @leaderboard to see current standings.";
-      const rulesResponse = await generateResponse(rulesPrompt);
-      await conversation.send(rulesResponse);
+interface RecoveryIdentifier {
+  identifier: string;
+  identifierKind: number;
+}
+
+interface InboxState {
+  inboxId: string;
+  recoveryIdentifier: RecoveryIdentifier;
+  installations: any[];
+  identifiers: any[];
+}
+
+async function handleCommand(
+  command: string,
+  conversation: Conversation,
+  senderAddress?: string
+) {
+  const [baseCommand, subCommand] = command.split(" ");
+
+  switch (baseCommand.toLowerCase()) {
+    case "/squabble":
+      if (!subCommand) {
+        // List all available commands
+        await conversation.send(`🎮 Available Squabble Commands:
+          • /squabble help - Show game rules and instructions
+          • /squabble start - Start a new game
+          • /squabble leaderboard - View current standings
+          • /squabble latest - View the latest game details`);
+        return;
+      }
+
+      switch (subCommand.toLowerCase()) {
+        case "help":
+          const rulesPrompt =
+            "Generate a concise and engaging explanation of the Squabble game rules. Include that players take turns making moves and the goal is to capture the most territory. Also mention that players can use /squabble start to begin a new game and /squabble leaderboard to see current standings.";
+          const rulesResponse = await generateResponse(rulesPrompt);
+          await conversation.send(rulesResponse);
+          break;
+
+        case "start":
+          const usernames = await conversation.members();
+          console.log("usernames", JSON.stringify(usernames, null, 2));
+          try {
+            const response = await fetch(`${SQUABBLE_URL}/api/create-game`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                usernames: usernames,
+                betAmount: "0.1", // Placeholder bet amount
+                creator: senderAddress || "unknown", // Use the sender's address if available
+              }),
+            });
+
+            if (!response.ok) {
+              throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const startPrompt =
+              "Generate an exciting message to start a new game of Squabble. Make it engaging and fun.";
+            const startResponse = await generateResponse(startPrompt);
+            await conversation.send(startResponse);
+          } catch (error) {
+            console.error("Error creating game:", error);
+            await conversation.send(
+              "❌ Failed to create game. Please try again."
+            );
+          }
+          break;
+
+        case "leaderboard":
+          const leaderboardPrompt =
+            "Generate a dynamic leaderboard message for Squabble. Include some example players with points to show the format.";
+          const leaderboardResponse = await generateResponse(leaderboardPrompt);
+          await conversation.send(leaderboardResponse);
+          break;
+
+        case "latest":
+          const latestPrompt =
+            "Generate a summary of the latest Squabble game. Include who played, the final score, and any notable moments. Make it exciting and engaging.";
+          const latestResponse = await generateResponse(latestPrompt);
+          await conversation.send(latestResponse);
+          break;
+
+        default:
+          await conversation.send(
+            "❌ Unknown command. Use /squabble to see all available commands."
+          );
+          break;
+      }
       break;
-    case "@start-game":
-      const startPrompt =
-        "Generate an exciting message to start a new game of Squabble. Make it engaging and fun.";
-      const startResponse = await generateResponse(startPrompt);
-      await conversation.send(startResponse);
-      break;
-    case "@leaderboard":
-      const leaderboardPrompt =
-        "Generate a dynamic leaderboard message for Squabble. Include some example players with points to show the format.";
-      const leaderboardResponse = await generateResponse(leaderboardPrompt);
-      await conversation.send(leaderboardResponse);
-      break;
+
     default:
+      // Ignore other commands
       break;
   }
 }
 
+// Initialize Express app
+const app = express();
+app.use(express.json());
+
+// Endpoint to trigger bot message
+app.post("/send-message", async (req: Request, res: Response) => {
+  try {
+    const { groupId, message } = req.body;
+
+    if (!groupId || !message) {
+      return res
+        .status(400)
+        .json({ error: "GroupId and message are required" });
+    }
+
+    if (!xmtpClient) {
+      return res.status(500).json({ error: "XMTP client not initialized" });
+    }
+
+    // Get or create conversation
+    const conversation = await xmtpClient.conversations.getConversationById(
+      groupId
+    );
+    if (!conversation) {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+
+    await conversation.send(message);
+
+    res.json({ success: true, message: "Message sent successfully" });
+  } catch (error) {
+    console.error("Error sending message:", error);
+    res.status(500).json({ error: "Failed to send message" });
+  }
+});
+
 async function main() {
-  const client = await Client.create(signer, {
+  xmtpClient = await Client.create(signer, {
     dbEncryptionKey,
     env: "dev" as XmtpEnv,
   });
-  void logAgentDetails(client);
+  void logAgentDetails(xmtpClient);
 
-  await client.conversations.sync();
+  await xmtpClient.conversations.sync();
 
-  const stream = await client.conversations.streamAllMessages();
+  const stream = await xmtpClient.conversations.streamAllMessages();
 
   for await (const message of stream) {
+    console.log("message", message);
     if (
-      message?.senderInboxId.toLowerCase() === client.inboxId.toLowerCase() ||
+      message?.senderInboxId.toLowerCase() ===
+        xmtpClient.inboxId.toLowerCase() ||
       message?.contentType?.typeId !== "text"
     ) {
       continue;
     }
 
-    const conversation = await client.conversations.getConversationById(
-      message.conversationId
+    const conversationId = message.conversationId;
+
+    const conversation = await xmtpClient.conversations.getConversationById(
+      conversationId
     );
+    console.log("conversation", JSON.stringify(conversation, null, 2));
 
     if (!conversation) {
       console.log("Unable to find conversation, skipping");
@@ -101,12 +209,27 @@ async function main() {
     // Check if the message is a command
     const decodedMessage = message as DecodedMessage;
     const messageText = (decodedMessage.content as Uint8Array).toString();
-    if (messageText.startsWith("@")) {
-      await handleCommand(messageText, conversation);
+    const senderInboxId = message.senderInboxId;
+    const senderState = (await xmtpClient.preferences.inboxStateFromInboxIds([
+      senderInboxId,
+    ])) as unknown as InboxState[];
+    const senderAddress = senderState[0]?.recoveryIdentifier?.identifier;
+    console.log("senderAddress", senderAddress);
+
+    console.log("members", await conversation.members());
+
+    if (messageText.startsWith("/")) {
+      await handleCommand(messageText, conversation, senderAddress);
     }
 
     console.log("Waiting for messages...");
   }
 }
+
+// Start Express server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
 
 main().catch(console.error);

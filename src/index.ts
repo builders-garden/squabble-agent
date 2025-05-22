@@ -27,6 +27,7 @@ const {
   SQUABBLE_URL,
   NEYNAR_API_KEY,
   AGENT_INBOX_ID,
+  AGENT_SECRET,
 } = validateEnvironment([
   "WALLET_KEY",
   "ENCRYPTION_KEY",
@@ -34,6 +35,7 @@ const {
   "SQUABBLE_URL",
   "NEYNAR_API_KEY",
   "AGENT_INBOX_ID",
+  "AGENT_SECRET",
 ]);
 
 let xmtpClient: Client | null = null;
@@ -62,7 +64,9 @@ async function handleCommand(
   senderAddress?: string,
   xmtpClient?: Client
 ) {
-  const [baseCommand, subCommand] = command.split(" ");
+  const parts = command.split(" ");
+  const baseCommand = parts[0];
+  const subCommand = parts.slice(1).join(" ");
 
   switch (baseCommand.toLowerCase()) {
     case "/squabble":
@@ -76,9 +80,11 @@ async function handleCommand(
         return;
       }
 
-      const [command, betAmount] = subCommand.split(" ");
+      const parts = subCommand.split(" ");
+      const subCommandName = parts[0];
+      const betAmount = parts[1];
 
-      switch (command.toLowerCase()) {
+      switch (subCommandName.toLowerCase()) {
         case "help":
           const rulesPrompt =
             "Generate a concise and engaging explanation of the Squabble game rules. Include that players take turns making moves and the goal is to capture the most territory. Also mention that players can use /squabble start to begin a new game and /squabble leaderboard to see current standings.";
@@ -101,12 +107,14 @@ async function handleCommand(
             .filter(Boolean);
 
           const usersFIDs = await fetchUsersByAddresses(memberAddresses!);
+          console.log("usersFIDs", usersFIDs);
 
           try {
             const response = await fetch(`${SQUABBLE_URL}/api/create-game`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
+                authorization: AGENT_SECRET.trim(),
               },
               body: JSON.stringify({
                 usernames: usersFIDs,
@@ -120,10 +128,11 @@ async function handleCommand(
               throw new Error(`HTTP error! status: ${response.status}`);
             }
 
-            const startPrompt =
-              "Generate an exciting message to start a new game of Squabble. Make it engaging and fun.";
-            const startResponse = await generateResponse(startPrompt);
-            await conversation.send(startResponse);
+            const gameData = await response.json();
+            const gameUrl = `${SQUABBLE_URL}/${gameData.id}`;
+            await conversation.send(
+              `🎮 Game created! You can play here: ${gameUrl}\nGood luck! 🍀`
+            );
           } catch (error) {
             console.error("Error creating game:", error);
             await conversation.send(
@@ -140,10 +149,30 @@ async function handleCommand(
           break;
 
         case "latest":
-          const latestPrompt =
-            "Generate a summary of the latest Squabble game. Include who played, the final score, and any notable moments. Make it exciting and engaging.";
-          const latestResponse = await generateResponse(latestPrompt);
-          await conversation.send(latestResponse);
+          try {
+            const response = await fetch(`${SQUABBLE_URL}/api/get-game`, {
+              method: "GET",
+              headers: {
+                "Content-Type": "application/json",
+                authorization: AGENT_SECRET.trim(),
+              },
+            });
+
+            if (!response.ok) {
+              throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const gameData = await response.json();
+            const gameUrl = `${SQUABBLE_URL}/${gameData.id}`;
+            await conversation.send(
+              `🎮 Latest Game:\nYou can view it here: ${gameUrl}`
+            );
+          } catch (error) {
+            console.error("Error fetching latest game:", error);
+            await conversation.send(
+              "❌ Failed to fetch latest game. Please try again."
+            );
+          }
           break;
 
         default:

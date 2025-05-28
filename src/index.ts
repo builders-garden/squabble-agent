@@ -62,6 +62,7 @@ async function handleCommand(
   command: string,
   conversation: Conversation,
   senderAddress?: string,
+  senderFid?: string,
   xmtpClient?: Client
 ) {
   const parts = command.split(" ");
@@ -117,9 +118,10 @@ async function handleCommand(
                 authorization: AGENT_SECRET.trim(),
               },
               body: JSON.stringify({
-                usernames: usersFIDs,
+                fids: usersFIDs,
                 betAmount: betAmount || "0",
-                creator: senderAddress || "unknown",
+                creatorAddress: senderAddress || "unknown",
+                creatorFid: senderFid || "unknown",
                 conversationId: conversation?.id,
               }),
             });
@@ -129,7 +131,7 @@ async function handleCommand(
             }
 
             const gameData = await response.json();
-            const gameUrl = `${SQUABBLE_URL}/${gameData.id}`;
+            const gameUrl = `${SQUABBLE_URL}/games/${gameData.id}`;
             await conversation.send(
               `🎮 Game created! You can play here: ${gameUrl}\nGood luck! 🍀`
             );
@@ -163,7 +165,7 @@ async function handleCommand(
             }
 
             const gameData = await response.json();
-            const gameUrl = `${SQUABBLE_URL}/${gameData.id}`;
+            const gameUrl = `${SQUABBLE_URL}/games/${gameData.id}`;
             await conversation.send(
               `🎮 Latest Game:\nYou can view it here: ${gameUrl}`
             );
@@ -254,7 +256,9 @@ async function main() {
       senderInboxId,
     ])) as unknown as InboxState[];
     const senderAddress = senderState[0]?.recoveryIdentifier?.identifier;
+    const senderFid = await fetchUsersByAddresses([senderAddress]);
     console.log("senderAddress", senderAddress);
+    console.log("senderFid", senderFid);
 
     const members = await conversation.members();
     console.log(
@@ -269,7 +273,13 @@ async function main() {
     );
 
     if (messageText.startsWith("/")) {
-      await handleCommand(messageText, conversation, senderAddress, xmtpClient);
+      await handleCommand(
+        messageText,
+        conversation,
+        senderAddress,
+        senderFid[0],
+        xmtpClient
+      );
     }
 
     console.log("Waiting for messages...");

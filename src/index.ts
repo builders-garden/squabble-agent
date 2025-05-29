@@ -58,6 +58,21 @@ interface InboxState {
   identifiers: any[];
 }
 
+interface LeaderboardPlayer {
+  fid: number;
+  displayName: string;
+  username: string;
+  avatarUrl: string;
+  points: number;
+  wins: number;
+  totalGames: number;
+}
+
+interface LeaderboardResponse {
+  leaderboard: LeaderboardPlayer[];
+  totalFinishedGames: number;
+}
+
 async function handleCommand(
   command: string,
   conversation: Conversation,
@@ -111,20 +126,23 @@ async function handleCommand(
           console.log("usersFIDs", usersFIDs);
 
           try {
-            const response = await fetch(`${SQUABBLE_URL}/api/create-game`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                authorization: AGENT_SECRET.trim(),
-              },
-              body: JSON.stringify({
-                fids: usersFIDs,
-                betAmount: betAmount || "0",
-                creatorAddress: senderAddress || "unknown",
-                creatorFid: senderFid || "unknown",
-                conversationId: conversation?.id,
-              }),
-            });
+            const response = await fetch(
+              `${SQUABBLE_URL}/api/agent/create-game`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  authorization: AGENT_SECRET.trim(),
+                },
+                body: JSON.stringify({
+                  fids: usersFIDs,
+                  betAmount: betAmount || "0",
+                  creatorAddress: senderAddress || "unknown",
+                  creatorFid: senderFid || "unknown",
+                  conversationId: conversation?.id,
+                }),
+              }
+            );
 
             if (!response.ok) {
               throw new Error(`HTTP error! status: ${response.status}`);
@@ -144,15 +162,65 @@ async function handleCommand(
           break;
 
         case "leaderboard":
-          const leaderboardPrompt =
-            "Generate a dynamic leaderboard message for Squabble. Include some example players with points to show the format.";
-          const leaderboardResponse = await generateResponse(leaderboardPrompt);
-          await conversation.send(leaderboardResponse);
+          try {
+            const response = await fetch(
+              `${SQUABBLE_URL}/api/agent/leaderboard?conversationId=${conversation?.id}`,
+              {
+                method: "GET",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: AGENT_SECRET.trim(),
+                },
+              }
+            );
+
+            if (!response.ok) {
+              throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const leaderboardData = await response.json();
+
+            // Create a filtered version for processing
+            const filteredLeaderboard = (
+              leaderboardData as LeaderboardResponse
+            ).leaderboard.map((player) => ({
+              fid: player.fid,
+              displayName: player.displayName,
+              username: player.username,
+              points: player.points,
+              wins: player.wins,
+              totalGames: player.totalGames,
+            }));
+
+            // Sort by points (highest first), then by wins if tied
+            filteredLeaderboard.sort((a, b) => {
+              if (b.points !== a.points) return b.points - a.points;
+              return b.wins - a.wins;
+            });
+
+            // Format the leaderboard table directly
+            let leaderboardMessage = "🏆 Squabble Leaderboard 🏆\n\n";
+
+            filteredLeaderboard.forEach((player, index) => {
+              const rank = index + 1;
+              leaderboardMessage += `${rank}. ${player.username} - ${player.points} pts (${player.wins}W/${player.totalGames}G)\n`;
+            });
+
+            leaderboardMessage +=
+              "\n🎮 Battle for the top spot! Who will claim victory next?";
+
+            await conversation.send(leaderboardMessage);
+          } catch (error) {
+            console.error("Error fetching leaderboard:", error);
+            await conversation.send(
+              "❌ Failed to fetch leaderboard. Please try again."
+            );
+          }
           break;
 
         case "latest":
           try {
-            const response = await fetch(`${SQUABBLE_URL}/api/get-game`, {
+            const response = await fetch(`${SQUABBLE_URL}/api/agent/get-game`, {
               method: "GET",
               headers: {
                 "Content-Type": "application/json",
@@ -210,7 +278,7 @@ async function main() {
   setupRoutes(app, xmtpClient);
 
   // Start Express server
-  const PORT = process.env.PORT || 3000;
+  const PORT = process.env.PORT || 3002;
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
